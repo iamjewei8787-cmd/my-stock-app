@@ -167,7 +167,3 @@ if st.button(f"🚀 開始掃描 {selected_date} 的飆股並回測", type="prim
             """)
         else:
             st.warning(f"⚠️ 在 {selected_date} 附近，全市場無符合雙同向強勢條件的股票。大盤當時可能處於弱勢。")
-            st.dataframe(results_df, use_container_width=True)
-            st.success("🎯 **操盤建議：** 上述為今日全市場中，符合【雙同向 + 成交量最大】的前 10 檔。請打開看盤軟體確認是否剛突破壓力區。")
-        else:
-            st.warning("⚠️ 今日全市場無符合雙同向強勢條件且量大的股票，大盤可能處於弱勢或震盪，建議多看少做。")
