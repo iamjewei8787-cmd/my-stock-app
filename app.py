@@ -1,7 +1,6 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import datetime
 import concurrent.futures
 import requests
@@ -10,8 +9,8 @@ import requests
 # 1. 介面設定
 # ==========================================
 st.set_page_config(page_title="台股波段選股與回測神器", page_icon="⏱️", layout="centered")
-st.title("⏱️ 台股波段選股 & 時光機回測 (放寬版)")
-st.markdown("**策略：** 排除 ETF | 成交量>500張 | MACD 動能向上 | KD 黃金交叉狀態")
+st.title("⏱️ 台股波段選股 (除錯測試版)")
+st.markdown("**測試策略：** 排除 ETF | **【僅保留】成交量 > 500 張** (無技術指標限制)")
 
 # ==========================================
 # 2. 自動抓取全台股代號 (政府 Open API)
@@ -34,58 +33,39 @@ def get_all_tw_tickers():
             if len(code) == 4 and code.isdigit() and not code.startswith('00'):
                 tickers.append(f"{code}.TWO")
     except Exception:
-        # 備用名單
         return ["2330.TW", "2317.TW", "2454.TW", "2382.TW", "3231.TW", "1519.TW", "2603.TW", "2409.TW"]
     return tickers
 
 # ==========================================
-# 3. 核心選股與回測邏輯 (放寬條件)
+# 3. 核心選股與回測邏輯 (純看成交量)
 # ==========================================
 def analyze_stock_with_backtest(ticker, target_date):
     try:
-        # 為了計算指標與看未來，抓取過去 1 年的資料
+        # 抓取過去 1 年的資料
         df = yf.download(ticker, period="1y", progress=False)
-        if df.empty or len(df) < 50:
+        if df.empty or len(df) < 2:
             return None
             
         # 移除時區資訊以便比對日期
         df.index = df.index.tz_localize(None)
         target_datetime = pd.to_datetime(target_date)
         
-        # 計算技術指標
-        macd = df.ta.macd(fast=12, slow=26, signal=9)
-        df = pd.concat([df, macd], axis=1)
-        stoch = df.ta.stoch(high='High', low='Low', close='Close', k=9, d=3, smooth_k=3)
-        df = pd.concat([df, stoch], axis=1)
-        
         # 切割資料：找到「目標日期」當天或之前最近的交易日
         past_df = df[df.index <= target_datetime]
-        if len(past_df) < 2:
+        if len(past_df) < 1:
             return None
             
-        # 取得目標日的狀態與前一天的狀態
+        # 取得目標日的狀態
         latest = past_df.iloc[-1]
-        prev = past_df.iloc[-2]
         signal_date = latest.name
         
-        macd_hist_col = [c for c in df.columns if 'MACDh' in c][0]
-        k_col = [c for c in df.columns if 'STOCHk' in c][0]
-        d_col = [c for c in df.columns if 'STOCHd' in c][0]
-        
         # ----------------------------------------------------
-        # 🌟 放寬後的 3 大濾網條件
+        # 🌟 唯一濾網：成交量 > 500 張 (500,000 股)
         # ----------------------------------------------------
-        # 條件 1：量大 (放寬至 >500張，尋找剛起漲中小型股)
         vol_condition = latest['Volume'] > 500000 
         
-        # 條件 2：MACD 動能向上 (只要今天的柱狀圖比昨天長即可，不需要大於 0)
-        macd_condition = latest[macd_hist_col] > prev[macd_hist_col]
-        
-        # 條件 3：KD 黃金交叉狀態 (只要 K > D 即可)
-        kd_condition = latest[k_col] > latest[d_col]
-        # ----------------------------------------------------
-        
-        if vol_condition and macd_condition and kd_condition:
+        # 只要符合成交量，就直接錄取！(拔除 MACD 與 KD 判斷)
+        if vol_condition:
             entry_price = float(latest['Close'])
             pure_ticker = ticker.split('.')[0]
             
@@ -128,7 +108,7 @@ selected_date = st.date_input(
     max_value=today
 )
 
-if st.button(f"🚀 開始掃描 {selected_date} 的飆股並回測", type="primary"):
+if st.button(f"🚀 開始測試 {selected_date} 的成交量名單", type="primary"):
     
     st.info("🔄 獲取上市櫃名單中...")
     stock_list = get_all_tw_tickers()
@@ -162,14 +142,8 @@ if st.button(f"🚀 開始掃描 {selected_date} 的飆股並回測", type="prim
             results_df.reset_index(drop=True, inplace=True)
             results_df.index = results_df.index + 1
             
-            st.success(f"🎯 在 **{selected_date}** 這天，放寬條件後的前 10 大熱門股及後續表現如下：")
+            st.success(f"🎯 在 **{selected_date}** 這天，全市場成交量最大的前 10 檔個股如下：")
             st.dataframe(results_df, use_container_width=True)
             
-            st.markdown("""
-            **📊 報表說明：**
-            * **買進價**：以訊號發生當天的收盤價計算。
-            * **兩週內最高價**：買進後 14 天內，該股票觸及的最高價。
-            * **潛在最大獲利(%)**：如果在最高點賣出，你能賺取的最大報酬率。
-            """)
         else:
-            st.warning(f"⚠️ 在 {selected_date} 附近，即使放寬條件仍無符合的股票，代表當日為極端空頭行情。")
+            st.error(f"⚠️ 嚴重異常：在 {selected_date} 找不到任何大於 500 張的股票。這代表資料庫連線或 API 有問題，而非策略問題。")
