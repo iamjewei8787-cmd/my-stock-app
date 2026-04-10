@@ -6,45 +6,51 @@ import datetime
 import concurrent.futures
 import requests
 
+# ==========================================
 # 1. 介面設定
+# ==========================================
 st.set_page_config(page_title="台股波段選股神器", page_icon="📈", layout="centered")
 st.title("📈 台股波段選股神器 (全市場掃描版)")
 st.markdown("**策略：** 掃描全台股上市/上櫃 | 排除 ETF | MACD 翻紅 + KD 黃金交叉 | 依成交量排行")
 
-# 2. 自動抓取全台股代號 (加入 Cache 避免重複抓取被封鎖)
-@st.cache_data(ttl=86400) # 每天只抓一次名單
+# ==========================================
+# 2. 自動抓取全台股代號 (使用政府 Open API)
+# ==========================================
+@st.cache_data(ttl=86400) # 每天只抓一次名單，減少伺服器負擔
 def get_all_tw_tickers():
     tickers = []
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    
-    # 證交所(上市)與櫃買中心(上櫃)的公開資料網址
-    urls = {
-        ".TW": "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2",
-        ".TWO": "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
-    }
-    
-    for suffix, url in urls.items():
-        try:
-            res = requests.get(url, headers=headers)
-            res.encoding = 'big5'
-            df = pd.read_html(res.text)[0]
-            
-            # 清洗資料：取得代號欄位
-            df.columns = df.iloc[0]
-            df = df.iloc[2:]
-            # 分割代號與名稱 (注意這裡的空白是全形空白)
-            df['代號'] = df['有價證券代號及名稱'].astype(str).str.split('　').str[0]
-            
-            # 嚴格篩選：只要 4 位數字的代號 (排除權證、特別股，排除 00 開頭的 ETF)
-            valid_stocks = df[df['代號'].str.match(r'^[1-9]\d{3}$')]
-            tickers.extend([f"{t}{suffix}" for t in valid_stocks['代號']])
-            
-        except Exception as e:
-            continue
-            
+    try:
+        # 1. 抓取上市股票 (使用證交所 Open API)
+        twse_url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+        res_twse = requests.get(twse_url, timeout=10)
+        for item in res_twse.json():
+            code = item.get('Code', '')
+            # 篩選 4 位數字代號，且排除 00 開頭的 ETF
+            if len(code) == 4 and code.isdigit() and not code.startswith('00'):
+                tickers.append(f"{code}.TW")
+                
+        # 2. 抓取上櫃股票 (使用櫃買中心 Open API)
+        tpex_url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
+        res_tpex = requests.get(tpex_url, timeout=10)
+        for item in res_tpex.json():
+            code = item.get('SecuritiesCompanyCode', '')
+            if len(code) == 4 and code.isdigit() and not code.startswith('00'):
+                tickers.append(f"{code}.TWO")
+                
+    except Exception as e:
+        # 終極防呆機制：如果政府 API 剛好在維護，載入備用熱門股名單確保 App 不會崩潰
+        return [
+            "2330.TW", "2317.TW", "2454.TW", "2382.TW", "3231.TW", "2308.TW", "1519.TW", 
+            "1514.TW", "2356.TW", "5371.TWO", "2603.TW", "2609.TW", "2615.TW", "3481.TW", 
+            "2409.TW", "2303.TW", "2881.TW", "2882.TW", "2891.TW", "2324.TW", "2376.TW", 
+            "3037.TW", "8046.TW", "3189.TW", "6274.TWO", "3017.TW", "2368.TW"
+        ]
+        
     return tickers
 
-# 3. 單一股票的分析邏輯
+# ==========================================
+# 3. 單一股票的技術分析邏輯
+# ==========================================
 def analyze_stock(ticker):
     try:
         # 抓取近半年資料
@@ -83,16 +89,18 @@ def analyze_stock(ticker):
         return None
     return None
 
-# 4. 介面與多執行緒執行區塊
+# ==========================================
+# 4. 介面互動與多執行緒掃描區塊
+# ==========================================
 if st.button("🚀 啟動全市場掃描 (需時約 1-2 分鐘)", type="primary"):
     
-    st.info("🔄 正在連線至證交所獲取最新上市櫃名單...")
+    st.info("🔄 正在連線至政府 Open API 獲取最新上市櫃名單...")
     stock_list = get_all_tw_tickers()
     
     if not stock_list:
         st.error("❌ 無法獲取股票名單，請稍後再試。")
     else:
-        st.success(f"✅ 成功獲取 {len(stock_list)} 檔股票，開始分析...")
+        st.success(f"✅ 成功獲取 {len(stock_list)} 檔股票，開始高速分析...")
         
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -128,6 +136,6 @@ if st.button("🚀 啟動全市場掃描 (需時約 1-2 分鐘)", type="primary"
             
             st.subheader(f"📅 今日 ({datetime.datetime.now().strftime('%Y-%m-%d')}) 嚴選爆發潛力股")
             st.dataframe(results_df, use_container_width=True)
-            st.success("🎯 **操盤建議：** 上述為今日全市場中，符合【雙同向 + 成交量最大】的前 10 檔。請打開 K 線圖確認是否剛突破壓力區。")
+            st.success("🎯 **操盤建議：** 上述為今日全市場中，符合【雙同向 + 成交量最大】的前 10 檔。請打開看盤軟體確認是否剛突破壓力區。")
         else:
             st.warning("⚠️ 今日全市場無符合雙同向強勢條件且量大的股票，大盤可能處於弱勢或震盪，建議多看少做。")
