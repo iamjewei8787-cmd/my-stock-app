@@ -10,8 +10,8 @@ import requests
 # 1. 介面設定
 # ==========================================
 st.set_page_config(page_title="台股波段選股與回測神器", page_icon="⏱️", layout="centered")
-st.title("⏱️ 台股波段選股 & 時光機回測")
-st.markdown("**策略：** 排除 ETF | 成交量>1500張 | MACD 翻紅 + KD 黃金交叉")
+st.title("⏱️ 台股波段選股 & 時光機回測 (放寬版)")
+st.markdown("**策略：** 排除 ETF | 成交量>500張 | MACD 動能向上 | KD 黃金交叉狀態")
 
 # ==========================================
 # 2. 自動抓取全台股代號 (政府 Open API)
@@ -39,7 +39,7 @@ def get_all_tw_tickers():
     return tickers
 
 # ==========================================
-# 3. 核心選股與回測邏輯
+# 3. 核心選股與回測邏輯 (放寬條件)
 # ==========================================
 def analyze_stock_with_backtest(ticker, target_date):
     try:
@@ -52,7 +52,7 @@ def analyze_stock_with_backtest(ticker, target_date):
         df.index = df.index.tz_localize(None)
         target_datetime = pd.to_datetime(target_date)
         
-        # 計算技術指標 (在全部資料上計算，避免邊界效應)
+        # 計算技術指標
         macd = df.ta.macd(fast=12, slow=26, signal=9)
         df = pd.concat([df, macd], axis=1)
         stoch = df.ta.stoch(high='High', low='Low', close='Close', k=9, d=3, smooth_k=3)
@@ -72,10 +72,18 @@ def analyze_stock_with_backtest(ticker, target_date):
         k_col = [c for c in df.columns if 'STOCHk' in c][0]
         d_col = [c for c in df.columns if 'STOCHd' in c][0]
         
-        # 條件：量大(放寬至 >1500張) + MACD翻紅/向上 + KD向上
-        vol_condition = latest['Volume'] > 1500000 
-        macd_condition = (latest[macd_hist_col] > 0) and (latest[macd_hist_col] > prev[macd_hist_col])
-        kd_condition = (latest[k_col] > latest[d_col]) and (latest[k_col] > prev[k_col])
+        # ----------------------------------------------------
+        # 🌟 放寬後的 3 大濾網條件
+        # ----------------------------------------------------
+        # 條件 1：量大 (放寬至 >500張，尋找剛起漲中小型股)
+        vol_condition = latest['Volume'] > 500000 
+        
+        # 條件 2：MACD 動能向上 (只要今天的柱狀圖比昨天長即可，不需要大於 0)
+        macd_condition = latest[macd_hist_col] > prev[macd_hist_col]
+        
+        # 條件 3：KD 黃金交叉狀態 (只要 K > D 即可)
+        kd_condition = latest[k_col] > latest[d_col]
+        # ----------------------------------------------------
         
         if vol_condition and macd_condition and kd_condition:
             entry_price = float(latest['Close'])
@@ -113,10 +121,9 @@ def analyze_stock_with_backtest(ticker, target_date):
 st.write("---")
 st.subheader("🗓️ 選擇你的時光機日期")
 
-# 設定日曆選擇器，預設為今天
 today = datetime.date.today()
 selected_date = st.date_input(
-    "請選擇你想驗證的日期 (例如選擇上個月的某一天)：", 
+    "請選擇你想驗證的日期：", 
     value=today,
     max_value=today
 )
@@ -134,7 +141,6 @@ if st.button(f"🚀 開始掃描 {selected_date} 的飆股並回測", type="prim
         total_stocks = len(stock_list)
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-            # 傳遞 selected_date 給分析函數
             future_to_ticker = {executor.submit(analyze_stock_with_backtest, ticker, selected_date): ticker for ticker in stock_list}
             
             for future in concurrent.futures.as_completed(future_to_ticker):
@@ -156,14 +162,14 @@ if st.button(f"🚀 開始掃描 {selected_date} 的飆股並回測", type="prim
             results_df.reset_index(drop=True, inplace=True)
             results_df.index = results_df.index + 1
             
-            st.success(f"🎯 在 **{selected_date}** 這天，全市場符合條件的前 10 大強勢股及後續表現如下：")
+            st.success(f"🎯 在 **{selected_date}** 這天，放寬條件後的前 10 大熱門股及後續表現如下：")
             st.dataframe(results_df, use_container_width=True)
             
             st.markdown("""
             **📊 報表說明：**
             * **買進價**：以訊號發生當天的收盤價計算。
             * **兩週內最高價**：買進後 14 天內，該股票觸及的最高價。
-            * **潛在最大獲利(%)**：如果在最高點賣出，你能賺取的最大報酬率。*(實戰中不可能永遠賣在最高點，此數據用於評估該策略的爆發力)*。
+            * **潛在最大獲利(%)**：如果在最高點賣出，你能賺取的最大報酬率。
             """)
         else:
-            st.warning(f"⚠️ 在 {selected_date} 附近，全市場無符合雙同向強勢條件的股票。大盤當時可能處於弱勢。")
+            st.warning(f"⚠️ 在 {selected_date} 附近，即使放寬條件仍無符合的股票，代表當日為極端空頭行情。")
