@@ -1,112 +1,124 @@
+import streamlit as st
 import yfinance as yf
 import pandas as pd
 import requests
 from datetime import datetime
+import time
 
+# --- 頁面設定 ---
+st.set_page_config(page_title="台股起漲潛伏選股器", layout="wide")
+
+st.title("🚀 台股起漲前夕：潛伏模式選股器")
+st.markdown("""
+本工具根據 **「均線糾結 + 縮量窒息 + 低位階」** 邏輯，篩選全台股普通股（排除 ETF）。
+> **核心指標：** $5MA, 10MA, 20MA, 60MA$ 糾結、成交量極縮、股價緊貼年線。
+""")
+
+# --- 函數定義 ---
+
+@st.cache_data(ttl=86400) # 每天更新一次清單
 def get_taiwan_stock_list():
-    """
-    從證交所抓取所有上市與上櫃股票清單，並排除 ETF 與權證
-    """
-    print("正在獲取全台股清單，請稍候...")
-    
-    # 上市股票清單網址
-    twse_url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
-    # 上櫃股票清單網址
-    tpex_url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
-    
-    tickers = []
-    
-    for url, suffix in [(twse_url, ".TW"), (tpex_url, ".TWO")]:
-        response = requests.get(url)
-        # 使用 pandas 讀取網頁表格
-        df = pd.read_html(response.text)[0]
-        # 整理格式
-        df.columns = df.iloc[0]
-        df = df.iloc[1:]
+    """抓取全台股普通股清單 (排除 ETF, 權證)"""
+    try:
+        twse_url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+        tpex_url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
         
-        # 關鍵篩選：
-        # 1. 排除 ETF (通常分類為 '股票' 以外的，或是代碼為 00 開頭)
-        # 2. CFICode 必須為 'ESVTFR' (代表普通股)
-        # 3. 過濾掉權證、特別股等
-        mask = (df['CFICode'] == 'ESVTFR') & (df['備註'].isna())
-        valid_stocks = df[mask]['有價證券代號及名稱'].str.split('　').str[0]
-        
-        tickers.extend([t + suffix for t in valid_stocks])
-    
-    print(f"成功獲取 {len(tickers)} 檔普通股標的。")
-    return tickers
+        tickers = []
+        for url, suffix in [(twse_url, ".TW"), (tpex_url, ".TWO")]:
+            response = requests.get(url)
+            df = pd.read_html(response.text)[0]
+            df.columns = df.iloc[0]
+            df = df.iloc[1:]
+            
+            # 篩選普通股 (ESVTFR) 並排除備註不為空的股票
+            mask = (df['CFICode'] == 'ESVTFR')
+            valid_stocks = df[mask]['有價證券代號及名稱'].str.split('　').str[0]
+            tickers.extend([t + suffix for t in valid_stocks])
+        return tickers
+    except Exception as e:
+        st.error(f"取得股票清單失敗: {e}")
+        return []
 
-def calculate_indicators(df):
-    """ 計算技術指標 """
-    df['MA5'] = df['Close'].rolling(5).mean()
-    df['MA10'] = df['Close'].rolling(10).mean()
-    df['MA20'] = df['Close'].rolling(20).mean()
-    df['MA60'] = df['Close'].rolling(60).mean()
-    df['MA240'] = df['Close'].rolling(240).mean()
-    df['V_MA20'] = df['Volume'].rolling(20).mean()
-    
-    # 20日振幅
-    df['Max_20'] = df['Close'].rolling(20).max()
-    df['Min_20'] = df['Close'].rolling(20).min()
-    df['Amp_20'] = (df['Max_20'] - df['Min_20']) / df['Min_20']
-    return df
-
-def scan_logic(df, symbol):
-    """ 潛伏模式核心邏輯 """
-    if len(df) < 240 or df['Volume'].iloc[-1] == 0: return None
+def analyze_stock(df, symbol):
+    """起漲潛伏模式邏輯分析"""
+    if len(df) < 240: return None
     
     latest = df.iloc[-1]
     
-    # 1. 均線糾結 (5, 10, 20, 60MA 差距 < 3.5%)
+    # 1. 均線糾結度 (5, 10, 20, 60 MA)
     ma_vals = [latest['MA5'], latest['MA10'], latest['MA20'], latest['MA60']]
     ma_spread = (max(ma_vals) - min(ma_vals)) / min(ma_vals)
     
     # 2. 成交量窒息 (今日量 < 20日均量 40%)
-    vol_ratio = latest['Volume'] / latest['V_MA20']
+    vol_ratio = latest['Volume'] / latest['V_MA20'] if latest['V_MA20'] > 0 else 1
     
-    # 3. 位階與盤整
+    # 3. 位階與盤整 (距離 240MA 12% 內，20日振幅 10% 內)
     dist_240 = (latest['Close'] - latest['MA240']) / latest['MA240']
     
-    # 最終篩選門檻
+    # 設定門檻
     if ma_spread < 0.035 and vol_ratio < 0.4 and abs(dist_240) < 0.12 and latest['Amp_20'] < 0.10:
         return {
-            "代號": symbol,
-            "收盤價": round(latest['Close'], 2),
-            "均線糾結": f"{round(ma_spread*100, 1)}%",
-            "量能縮比": f"{round(vol_ratio*100, 1)}%",
-            "位階(240MA)": f"{round(dist_240*100, 1)}%"
+            "股票代號": symbol,
+            "收盤價": round(float(latest['Close']), 2),
+            "均線糾結度": f"{round(ma_spread * 100, 2)}%",
+            "量能縮比": f"{round(vol_ratio * 100, 1)}%",
+            "距離年線": f"{round(dist_240 * 100, 1)}%",
+            "20日振幅": f"{round(latest['Amp_20'] * 100, 1)}%"
         }
     return None
 
-# --- 主程式執行 ---
-if __name__ == "__main__":
-    all_tickers = get_taiwan_stock_list()
-    final_list = []
-    
-    print(f"--- 開始掃描全市場 ({datetime.now().strftime('%Y-%m-%d')}) ---")
-    
-    # 為了避免掃描太慢，這裡使用循環，你也可以加上進度條
-    count = 0
-    for sym in all_tickers:
-        count += 1
-        if count % 100 == 0: print(f"已掃描 {count} 檔...")
-        
-        # 抓取最近 1 年數據即可
-        try:
-            data = yf.download(sym, period="1y", progress=False, show_errors=False)
-            if not data.empty:
-                data = calculate_indicators(data)
-                res = scan_logic(data, sym)
-                if res:
-                    final_list.append(res)
-        except:
-            continue
+# --- 主程式邏輯 ---
 
-    print("\n" + "="*30)
-    if final_list:
-        result_df = pd.DataFrame(final_list)
-        print(f"掃描完畢！共發現 {len(final_list)} 檔符合潛伏特徵之標的：")
-        print(result_df.to_string(index=False))
-    else:
-        print("今日全市場無符合「起漲前潛伏」特徵之標的。")
-    print("="*30)
+tickers = get_taiwan_stock_list()
+
+if not tickers:
+    st.warning("目前無法獲取股票清單，請稍後再試。")
+else:
+    st.sidebar.write(f"當前股票總數: {len(tickers)}")
+    
+    if st.button("🔍 開始全市場掃描 (需時約 5-8 分鐘)"):
+        final_results = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # 為了提升速度，每次抓取 1 年數據
+        for i, sym in enumerate(tickers):
+            # 更新進度條
+            pct = (i + 1) / len(tickers)
+            progress_bar.progress(pct)
+            if i % 50 == 0:
+                status_text.text(f"正在掃描: {sym} ({i+1}/{len(tickers)})")
+
+            try:
+                # 抓取數據 (使用 period='1y' 兼顧 MA240 與速度)
+                data = yf.download(sym, period="1y", progress=False, show_errors=False)
+                
+                if data.empty or len(data) < 240:
+                    continue
+                
+                # 技術指標計算
+                data['MA5'] = data['Close'].rolling(5).mean()
+                data['MA10'] = data['Close'].rolling(10).mean()
+                data['MA20'] = data['Close'].rolling(20).mean()
+                data['MA60'] = data['Close'].rolling(60).mean()
+                data['MA240'] = data['Close'].rolling(240).mean()
+                data['V_MA20'] = data['Volume'].rolling(20).mean()
+                data['Amp_20'] = (data['Close'].rolling(20).max() - data['Close'].rolling(20).min()) / data['Close'].rolling(20).min()
+                
+                res = analyze_stock(data, sym)
+                if res:
+                    final_results.append(res)
+            except:
+                continue
+        
+        status_text.text("掃描完成！")
+        
+        if final_results:
+            st.success(f"找到 {len(final_results)} 檔符合潛伏特徵標的")
+            st.dataframe(pd.DataFrame(final_results), use_container_width=True)
+            st.balloons()
+        else:
+            st.info("今日全台股無符合「起漲潛伏」特徵標的。")
+
+st.divider()
+st.caption("註：建議選出標點後，請手動確認大戶持股比例與最新營收 YoY 是否轉正。數據由 yfinance 提供，僅供參考。")
