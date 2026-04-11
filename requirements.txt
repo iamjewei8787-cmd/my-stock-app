@@ -1,5 +1,6 @@
-pandas
+streamlit
 yfinance
+pandas
 requests
 lxml
 html5lib
